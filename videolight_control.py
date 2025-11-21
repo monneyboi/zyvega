@@ -2,9 +2,13 @@
 Based on reverse-engineered protocol
 """
 
+import asyncio
+import logging
 import struct
 from typing import List, Optional
 from bleak import BleakClient, BleakScanner
+
+logger = logging.getLogger(__name__)
 
 
 class CrcCheck:
@@ -113,13 +117,24 @@ class VideoLightController:
     async def scan_for_device(self) -> Optional[str]:
         """Scan for PL103 video light"""
         print("Scanning for PL103 video light...")
+        logger.info("Starting BLE scan with 5 second timeout")
         devices = await BleakScanner.discover(timeout=5.0)
 
+        logger.debug(f"Found {len(devices)} BLE devices")
+
         for device in devices:
+            logger.debug(f"Device: name='{device.name}', address={device.address}, rssi={device.rssi}")
+            if device.details:
+                logger.debug(f"  Details: {device.details}")
+            if hasattr(device, 'metadata') and device.metadata:
+                logger.debug(f"  Metadata: {device.metadata}")
+
             if device.name and device.name.startswith("PL103"):
                 print(f"Found device: {device.name} ({device.address})")
+                logger.info(f"Matched PL103 device: {device.name} at {device.address}")
                 return device.address
 
+        logger.warning("No PL103 devices found in scan")
         return None
 
     async def connect(self, address: Optional[str] = None) -> bool:
@@ -132,42 +147,135 @@ class VideoLightController:
         Returns:
             True if connected successfully
         """
-        try:
+        if address is None:
+            address = await self.scan_for_device()
             if address is None:
-                address = await self.scan_for_device()
-                if address is None:
-                    print("No PL103 device found")
-                    return False
+                print("No PL103 device found")
+                logger.error("No PL103 device found during scan")
+                return False
 
-            self.device_address = address
-            print(f"Connecting to {address}...")
+        self.device_address = address
+        logger.info(f"Target device address: {address}")
 
-            self.client = BleakClient(address)
-            await self.client.connect()
+        # Retry connection logic (matching app behavior: 3 retries with delays)
+        max_retries = 3
+        retry_delay = 0.1  # 100ms between retries
 
-            # Enable notifications
-            await self.client.start_notify(self.NOTIFY_CHAR_UUID, self._handle_notification)
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    print(f"Retry attempt {attempt + 1}/{max_retries}...")
+                    logger.info(f"Retry attempt {attempt + 1}/{max_retries} after {retry_delay}s delay")
+                    await asyncio.sleep(retry_delay)
 
-            print("Connected to video light!")
-            return True
+                print(f"Connecting to {address}...")
+                logger.info(f"Creating BleakClient with 15s timeout")
 
-        except Exception as e:
-            print(f"Connection failed: {e}")
-            return False
+                # Create client with timeout matching app (15 seconds)
+                self.client = BleakClient(address, timeout=15.0)
+                logger.debug(f"BleakClient created, initiating connection...")
+
+                await self.client.connect(timeout=15.0)
+                logger.info("BLE connection established")
+
+                # Log discovered services
+                if self.client.is_connected:
+                    logger.debug("Discovering services...")
+                    services = self.client.services
+                    logger.debug(f"Found {len(services)} services:")
+                    for service in services:
+                        logger.debug(f"  Service: {service.uuid}")
+                        for char in service.characteristics:
+                            props = []
+                            if "read" in char.properties:
+                                props.append("READ")
+                            if "write" in char.properties:
+                                props.append("WRITE")
+                            if "write-without-response" in char.properties:
+                                props.append("WRITE_NO_RESP")
+                            if "notify" in char.properties:
+                                props.append("NOTIFY")
+                            if "indicate" in char.properties:
+                                props.append("INDICATE")
+                            logger.debug(f"    Char: {char.uuid} [{', '.join(props)}]")
+
+                    # Check if our target service exists
+                    target_service = None
+                    for service in services:
+                        if service.uuid.lower() == self.SERVICE_UUID.lower():
+                            target_service = service
+                            logger.info(f"Found target service: {self.SERVICE_UUID}")
+                            break
+
+                    if not target_service:
+                        logger.error(f"Target service {self.SERVICE_UUID} not found!")
+                        logger.error(f"Available services: {[s.uuid for s in services]}")
+                        await self.client.disconnect()
+                        continue
+
+                    # Check characteristics
+                    write_char = None
+                    notify_char = None
+                    for char in target_service.characteristics:
+                        if char.uuid.lower() == self.WRITE_CHAR_UUID.lower():
+                            write_char = char
+                            logger.info(f"Found write characteristic: {self.WRITE_CHAR_UUID}")
+                        if char.uuid.lower() == self.NOTIFY_CHAR_UUID.lower():
+                            notify_char = char
+                            logger.info(f"Found notify characteristic: {self.NOTIFY_CHAR_UUID}")
+
+                    if not write_char:
+                        logger.error(f"Write characteristic {self.WRITE_CHAR_UUID} not found!")
+                    if not notify_char:
+                        logger.error(f"Notify characteristic {self.NOTIFY_CHAR_UUID} not found!")
+
+                    if not write_char or not notify_char:
+                        await self.client.disconnect()
+                        continue
+
+                # Enable notifications
+                logger.debug(f"Enabling notifications on {self.NOTIFY_CHAR_UUID}")
+                await self.client.start_notify(self.NOTIFY_CHAR_UUID, self._handle_notification)
+                logger.info("Notifications enabled")
+
+                print("Connected to video light!")
+                logger.info("Successfully connected to video light")
+                return True
+
+            except Exception as e:
+                logger.error(f"Connection attempt {attempt + 1} failed", exc_info=True)
+                if attempt < max_retries - 1:
+                    print(f"Connection attempt {attempt + 1} failed: {e}")
+                else:
+                    print(f"Connection failed after {max_retries} attempts: {e}")
+
+        logger.error(f"Failed to connect after {max_retries} attempts")
+        return False
 
     def _handle_notification(self, sender, data: bytearray):
         """Handle notification from device"""
         hex_string = '-'.join(f'{b:02X}' for b in data)
+        logger.debug(f"Notification from {sender}: {hex_string} ({len(data)} bytes)")
         print(f"Received: {hex_string}")
 
     async def send_command(self, cmd: VideoLightCommand):
         """Send command to device"""
         if self.client is None or not self.client.is_connected:
+            logger.error("Attempted to send command while not connected")
             raise RuntimeError("Not connected to device")
 
+        cmd_bytes = cmd.get_bytes()
+        logger.info(f"Sending command: {cmd} ({len(cmd_bytes)} bytes)")
+        logger.debug(f"Command bytes: {' '.join(f'{b:02X}' for b in cmd_bytes)}")
         print(f"Sending: {cmd}")
-        await self.client.write_gatt_char(self.WRITE_CHAR_UUID, cmd.get_bytes())
-        self.sequence += 1
+
+        try:
+            await self.client.write_gatt_char(self.WRITE_CHAR_UUID, cmd_bytes)
+            logger.debug("Command sent successfully")
+            self.sequence += 1
+        except Exception as e:
+            logger.error(f"Failed to send command: {e}", exc_info=True)
+            raise
 
     async def set_brightness(self, brightness: int, device_id: int = 0x0380):
         """
@@ -250,5 +358,9 @@ class VideoLightController:
     async def disconnect(self):
         """Disconnect from device"""
         if self.client and self.client.is_connected:
+            logger.info("Disconnecting from device")
             await self.client.disconnect()
+            logger.info("Disconnected successfully")
             print("Disconnected")
+        else:
+            logger.debug("Disconnect called but client not connected")

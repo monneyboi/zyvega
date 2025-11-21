@@ -29,6 +29,9 @@ pip install -e .
 # Scan for available PL103 devices
 python main.py scan
 
+# Scan with verbose debug logging
+python main.py -v scan
+
 # Set brightness to 75%
 python main.py brightness 75
 
@@ -160,13 +163,42 @@ python main.py brightness 75 --device-id 0x0000
 
 ## Troubleshooting
 
+### Debug Logging
+
+Use the `-v` or `--verbose` flag to enable detailed debug logging:
+
+```bash
+# Scan with debug logging
+python main.py -v scan
+
+# Connect and control with debug logging
+python main.py -v brightness 75
+```
+
+This will show:
+- All BLE devices found during scan (name, address, RSSI)
+- Connection attempts and retries
+- Service and characteristic discovery
+- UUIDs of all available services
+- Detailed error messages with stack traces
+- Command bytes being sent/received
+
 **Device not found:**
 - Ensure the light is powered on and in pairing mode
 - Check Bluetooth is enabled on your system
+- Run with `-v` flag to see all BLE devices found
 - Try running with sudo on Linux if permission issues occur
+
+**Connection fails:**
+- Run with `-v` flag to see detailed connection logs
+- Check if the correct service UUID is found (0000fee9-0000-1000-8000-00805f9b34fb)
+- Verify write and notify characteristics are available
+- Try moving closer to the device (check RSSI in verbose output)
+- Ensure device isn't already connected to another device
 
 **Commands not working:**
 - Try different device IDs (0x0000, 0xFFFF, 0x0380)
+- Use `-v` flag to see command bytes and responses
 - Verify the light is properly connected
 - Check the device responses in the console output
 

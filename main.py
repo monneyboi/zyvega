@@ -1,6 +1,7 @@
 """Video Light CLI - Control PL103 video lights via Bluetooth"""
 
 import asyncio
+import logging
 import click
 from videolight_control import VideoLightController
 
@@ -12,11 +13,25 @@ def run_async(coro):
 
 @click.group()
 @click.option('--address', '-a', default=None, help='Device MAC address (auto-scan if not provided)')
+@click.option('--verbose', '-v', is_flag=True, help='Enable verbose debug logging')
 @click.pass_context
-def cli(ctx, address):
+def cli(ctx, address, verbose):
     """Control PL103 video light via Bluetooth"""
     ctx.ensure_object(dict)
     ctx.obj['address'] = address
+
+    # Setup logging
+    if verbose:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        logging.getLogger('bleak').setLevel(logging.DEBUG)
+    else:
+        logging.basicConfig(
+            level=logging.WARNING,
+            format='%(levelname)s: %(message)s'
+        )
 
 
 @cli.command()
