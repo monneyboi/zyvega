@@ -1,0 +1,13 @@
+[project]
+name = "zyvega"
+version = "0.1.0"
+description = "PL103 Video Light Controller - Bluetooth LE control via CLI"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1.0",
+    "bleak>=0.22.0",
+]
+
+[project.scripts]
+videolight = "main:cli"
