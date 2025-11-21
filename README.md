@@ -158,15 +158,6 @@ python main.py --device-id 0xFFFF brightness 75
 python main.py brightness 75 --device-id 0x0000
 ```
 
-## Legacy Web Implementation
-
-The original JavaScript implementation is still available:
-
-- `videolight_control.js` - JavaScript library using Web Bluetooth API
-- `videolight_test.html` - Browser-based testing interface
-
-To use the web interface, open `videolight_test.html` in a browser that supports Web Bluetooth (Chrome, Edge).
-
 ## Troubleshooting
 
 **Device not found:**
