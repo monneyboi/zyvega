@@ -9,7 +9,6 @@ A Python-based command-line tool for controlling PL103 video lights via **Blueto
 - Adjust color temperature (2700-6500K)
 - Set RGB colors
 - Power on/off control
-- Interactive mode for multiple commands
 - Automatic device discovery and provisioning
 - Multi-device support through mesh addressing
 
@@ -73,35 +72,6 @@ uv run python main.py --address D6:2C:5F:C2:E4:DD brightness 100
 uv run python main.py -v brightness 75
 ```
 
-### Interactive Mode
-
-For sending multiple commands via mesh:
-
-```bash
-uv run python main.py interactive
-```
-
-Available commands:
-- `b <0-100>` - Set brightness
-- `t <2700-6500>` - Set color temperature
-- `rgb <0-100> R G B` - Set RGB color
-- `on` - Turn light on
-- `off` - Turn light off
-- `q` or `quit` - Exit
-
-Example session:
-```
-> b 75
-✓ Brightness set to 75%
-> t 5600
-✓ Color temperature set to 5600K
-> rgb 80 255 128 64
-✓ RGB set to (255, 128, 64) at 80%
-> on
-✓ Light turned on
-> q
-```
-
 ## Architecture
 
 ### Mesh Provisioning (`mesh_provisioner.py`)
@@ -124,21 +94,12 @@ Controls provisioned devices:
 - Vendor model for color temperature and RGB
 - Multi-node support with address targeting
 
-### Legacy Direct BLE (`videolight_control.py`)
-
-Original direct BLE control (deprecated, as devices only accept mesh):
-
-- **CrcCheck** - CRC16 checksum calculator
-- **VideoLightCommand** - Command builder for Zhiyun protocol
-- **VideoLightController** - Direct BLE connection (not used)
-
 ### CLI (`main.py`)
 
 Click-based interface:
 
 - Mesh provisioning commands
 - Control commands via mesh
-- Interactive mode
 - Device management
 
 ## Protocol Details
@@ -292,9 +253,6 @@ uv run python main.py brightness 80
 
 # Set warm white
 uv run python main.py temp 3200
-
-# Or use interactive mode
-uv run python main.py interactive
 ```
 
 ### 3. Manage Multiple Lamps
