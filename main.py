@@ -4,6 +4,7 @@ import asyncio
 import logging
 import click
 from videolight_control import VideoLightController
+from mesh_provisioner import MeshProvisioner
 
 
 def run_async(coro):
@@ -170,6 +171,113 @@ def interactive(ctx):
             await controller.disconnect()
 
     run_async(interactive_mode())
+
+
+# Mesh Provisioning Commands
+@cli.group()
+def mesh():
+    """Bluetooth Mesh provisioning commands"""
+    pass
+
+
+@mesh.command('scan')
+@click.option('--timeout', '-t', default=5.0, help='Scan timeout in seconds')
+@click.pass_context
+def mesh_scan(ctx, timeout):
+    """Scan for unprovisioned mesh devices"""
+    async def scan():
+        provisioner = MeshProvisioner()
+        devices = await provisioner.scan_unprovisioned(timeout)
+
+        if not devices:
+            click.echo("No unprovisioned mesh devices found")
+            return
+
+        click.echo(f"\nFound {len(devices)} unprovisioned device(s):")
+        for device in devices:
+            rssi_str = f"RSSI: {device['rssi']} dBm" if device['rssi'] else ""
+            click.echo(f"  {device['name']:20s} {device['address']} {rssi_str}")
+            if device['uuid']:
+                click.echo(f"    UUID: {device['uuid']}")
+
+    run_async(scan())
+
+
+@mesh.command('setup')
+@click.option('--address', '-a', default=None, help='Device MAC address (auto-scan if not provided)')
+@click.pass_context
+def mesh_setup(ctx, address):
+    """Setup (provision and configure) a mesh device"""
+    async def setup():
+        provisioner = MeshProvisioner()
+
+        click.echo("Starting mesh device setup...")
+        if address:
+            click.echo(f"Target device: {address}")
+        else:
+            click.echo("Scanning for PL103 devices...")
+
+        if await provisioner.setup_device(address):
+            click.echo("\n✓ Device setup complete!")
+            click.echo("The device is now part of the mesh network.")
+        else:
+            click.echo("\n✗ Device setup failed", err=True)
+            ctx.exit(1)
+
+    run_async(setup())
+
+
+@mesh.command('list')
+@click.pass_context
+def mesh_list(ctx):
+    """List all provisioned mesh nodes"""
+    provisioner = MeshProvisioner()
+    nodes = provisioner.list_nodes()
+
+    if not nodes:
+        click.echo("No provisioned nodes found")
+        return
+
+    click.echo(f"\nProvisioned nodes ({len(nodes)}):")
+    for node in nodes:
+        addr = node.get('unicast_address')
+        click.echo(f"  {node['address']:20s} @ 0x{addr:04x}")
+
+
+@mesh.command('remove')
+@click.argument('address')
+@click.pass_context
+def mesh_remove(ctx, address):
+    """Remove a node from the mesh network"""
+    provisioner = MeshProvisioner()
+
+    click.echo(f"Removing node: {address}")
+    if provisioner.remove_node(address):
+        click.echo("✓ Node removed successfully")
+    else:
+        click.echo("✗ Failed to remove node", err=True)
+        ctx.exit(1)
+
+
+@mesh.command('teardown')
+@click.option('--confirm', is_flag=True, help='Skip confirmation prompt')
+@click.pass_context
+def mesh_teardown(ctx, confirm):
+    """Destroy the mesh network and remove all nodes"""
+    if not confirm:
+        click.echo("This will remove all provisioned nodes and destroy the mesh network.")
+        if not click.confirm("Are you sure?"):
+            click.echo("Aborted")
+            return
+
+    provisioner = MeshProvisioner()
+
+    click.echo("Tearing down mesh network...")
+    if provisioner.destroy_network():
+        click.echo("✓ Mesh network destroyed")
+    else:
+        click.echo("✗ Failed to teardown network", err=True)
+        ctx.exit(1)
 
 
 if __name__ == "__main__":

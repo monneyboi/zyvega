@@ -23,6 +23,29 @@ pip install -e .
 
 ## Usage
 
+### Mesh Provisioning Commands
+
+The PL103 lamp supports Bluetooth Mesh networking. You need to provision the device before you can control it.
+
+```bash
+# Scan for unprovisioned mesh devices
+python main.py mesh scan
+
+# Setup (provision and configure) a device
+python main.py mesh setup
+# Or specify device address
+python main.py mesh setup --address AA:BB:CC:DD:EE:FF
+
+# List all provisioned nodes
+python main.py mesh list
+
+# Remove a node from the mesh
+python main.py mesh remove AA:BB:CC:DD:EE:FF
+
+# Teardown the entire mesh network
+python main.py mesh teardown --confirm
+```
+
 ### Basic Commands
 
 ```bash
@@ -207,12 +230,33 @@ This will show:
 - Install bluez: `sudo apt install bluez`
 - Add your user to the bluetooth group: `sudo usermod -a -G bluetooth $USER`
 
+## Mesh Provisioning Workflow
+
+1. **Setup the mesh network** (first time only):
+   ```bash
+   python main.py mesh setup
+   ```
+   This will:
+   - Create a mesh network configuration
+   - Scan for unprovisioned PL103 devices
+   - Provision the device with a unicast address
+   - Configure the device with application keys
+
+2. **Control the device** via mesh or direct BLE connection
+
+3. **Teardown** when no longer needed:
+   ```bash
+   python main.py mesh teardown --confirm
+   ```
+
 ## Development
 
 The project uses:
 - **Python 3.12+** - Modern Python features
 - **Click** - CLI framework
 - **Bleak** - Cross-platform Bluetooth LE library
+- **dbus-python** - D-Bus bindings for mesh communication
+- **PyGObject** - GLib integration for mesh stack
 
 ## License
 
