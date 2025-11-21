@@ -1,15 +1,17 @@
 # Zyvega - PL103 Video Light Controller
 
-A Python-based command-line tool for controlling PL103 video lights via Bluetooth LE. This implementation is based on reverse engineering the Zhiyun Vega app protocol.
+A Python-based command-line tool for controlling PL103 video lights via **Bluetooth Mesh**. This implementation is based on reverse engineering the Zhiyun Vega app protocol and uses the BlueZ mesh stack.
 
 ## Features
 
+- **Bluetooth Mesh networking** - Control lights through a mesh network
 - Control brightness (0-100%)
 - Adjust color temperature (2700-6500K)
 - Set RGB colors
+- Power on/off control
 - Interactive mode for multiple commands
-- Automatic device discovery
-- Cross-platform support (Linux, macOS, Windows)
+- Automatic device discovery and provisioning
+- Multi-device support through mesh addressing
 
 ## Installation
 
@@ -46,71 +48,98 @@ python main.py mesh remove AA:BB:CC:DD:EE:FF
 python main.py mesh teardown --confirm
 ```
 
-### Basic Commands
+### Control Commands (After Provisioning)
+
+Once your lamp is provisioned, you can control it:
 
 ```bash
-# Scan for available PL103 devices
-python main.py scan
-
-# Scan with verbose debug logging
-python main.py -v scan
+# Turn light on/off
+uv run python main.py power on
+uv run python main.py power off
 
 # Set brightness to 75%
-python main.py brightness 75
+uv run python main.py brightness 75
 
 # Set color temperature to 5600K
-python main.py temp 5600
+uv run python main.py temp 5600
 
 # Set RGB color: 50% brightness, full red
-python main.py rgb 50 255 0 0
+uv run python main.py rgb 50 255 0 0
 
-# Specify device address (if you have multiple devices)
-python main.py --address AA:BB:CC:DD:EE:FF brightness 100
+# Control specific device (if you have multiple)
+uv run python main.py --address D6:2C:5F:C2:E4:DD brightness 100
+
+# Verbose logging
+uv run python main.py -v brightness 75
 ```
 
 ### Interactive Mode
 
-For sending multiple commands without reconnecting:
+For sending multiple commands via mesh:
 
 ```bash
-python main.py interactive
+uv run python main.py interactive
 ```
 
-Once connected, you can use:
+Available commands:
 - `b <0-100>` - Set brightness
 - `t <2700-6500>` - Set color temperature
 - `rgb <0-100> R G B` - Set RGB color
+- `on` - Turn light on
+- `off` - Turn light off
 - `q` or `quit` - Exit
 
 Example session:
 ```
 > b 75
-Set brightness to 75%
+✓ Brightness set to 75%
 > t 5600
-Set color temperature to 5600K
+✓ Color temperature set to 5600K
 > rgb 80 255 128 64
-Set RGB to (255, 128, 64) at 80%
+✓ RGB set to (255, 128, 64) at 80%
+> on
+✓ Light turned on
 > q
 ```
 
 ## Architecture
 
-### Python Library (`videolight_control.py`)
+### Mesh Provisioning (`mesh_provisioner.py`)
 
-The library provides:
+Handles device provisioning:
 
-- **CrcCheck** - CRC16 checksum calculator for protocol messages
-- **VideoLightCommand** - Command builder that constructs properly formatted BLE messages
-- **VideoLightController** - Bluetooth LE controller using the Bleak library
+- **MeshProvisioner** - Provisions devices into the mesh network
+- Network creation and management
+- Device discovery via Mesh Provisioning Service (0x1827)
+- Configuration storage in `~/.config/zyvega/mesh/`
+- Integration with BlueZ mesh stack via `mesh-cfgclient`
+
+### Mesh Control (`mesh_control.py`)
+
+Controls provisioned devices:
+
+- **MeshLightController** - Sends commands through mesh network
+- Generic OnOff model for power control
+- Generic Level model for brightness
+- Vendor model for color temperature and RGB
+- Multi-node support with address targeting
+
+### Legacy Direct BLE (`videolight_control.py`)
+
+Original direct BLE control (deprecated, as devices only accept mesh):
+
+- **CrcCheck** - CRC16 checksum calculator
+- **VideoLightCommand** - Command builder for Zhiyun protocol
+- **VideoLightController** - Direct BLE connection (not used)
 
 ### CLI (`main.py`)
 
-A Click-based command-line interface that provides:
+Click-based interface:
 
-- Simple one-shot commands for quick control
-- Interactive mode for extended control sessions
-- Device scanning and auto-discovery
-- Input validation and error handling
+- Mesh provisioning commands
+- Control commands via mesh
+- Interactive mode
+- Device management
 
 ## Protocol Details
 
@@ -230,24 +259,66 @@ This will show:
 - Install bluez: `sudo apt install bluez`
 - Add your user to the bluetooth group: `sudo usermod -a -G bluetooth $USER`
 
-## Mesh Provisioning Workflow
+## Complete Workflow
 
-1. **Setup the mesh network** (first time only):
-   ```bash
-   python main.py mesh setup
-   ```
-   This will:
-   - Create a mesh network configuration
-   - Scan for unprovisioned PL103 devices
-   - Provision the device with a unicast address
-   - Configure the device with application keys
+### 1. Initial Setup (First Time)
 
-2. **Control the device** via mesh or direct BLE connection
+```bash
+# Ensure bluetooth-mesh service is running
+sudo systemctl status bluetooth-meshd
 
-3. **Teardown** when no longer needed:
-   ```bash
-   python main.py mesh teardown --confirm
-   ```
+# Scan for your PL103 lamp
+uv run python main.py scan
+
+# Provision the lamp into mesh network
+uv run python main.py mesh setup
+```
+
+This will:
+- Create mesh network configuration in `~/.config/zyvega/mesh/`
+- Scan for unprovisioned devices (advertising service 0x1827)
+- Provision with no OOB authentication
+- Assign unicast address (0x0001, 0x0002, etc.)
+- Configure with application keys
+
+### 2. Control Your Lamp
+
+```bash
+# Turn on
+uv run python main.py power on
+
+# Set brightness
+uv run python main.py brightness 80
+
+# Set warm white
+uv run python main.py temp 3200
+
+# Or use interactive mode
+uv run python main.py interactive
+```
+
+### 3. Manage Multiple Lamps
+
+```bash
+# List all provisioned lamps
+uv run python main.py mesh list
+
+# Control specific lamp
+uv run python main.py -a D6:2C:5F:C2:E4:DD brightness 50
+
+# Add another lamp
+uv run python main.py mesh setup -a AA:BB:CC:DD:EE:FF
+```
+
+### 4. Teardown (Optional)
+
+```bash
+# Remove specific lamp
+uv run python main.py mesh remove D6:2C:5F:C2:E4:DD
+
+# Destroy entire network
+uv run python main.py mesh teardown --confirm
+```
 
 ## Development
 
