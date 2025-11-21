@@ -105,9 +105,10 @@ CMD_CHMCOOR = 0x1007      # Chromatic coordinate control
 class VideoLightController:
     """Video light controller using Bluetooth LE"""
 
-    SERVICE_UUID = "0000fee9-0000-1000-8000-00805f9b34fb"
-    WRITE_CHAR_UUID = "d44bc439-abfd-45a2-b575-925416129600"
-    NOTIFY_CHAR_UUID = "d44bc439-abfd-45a2-b575-925416129601"
+    # Bluetooth Mesh Provisioning Service UUIDs (from ZYLightMeshBleClient.smali)
+    SERVICE_UUID = "00001828-0000-1000-8000-00805F9B34FB"  # Mesh Provisioning Service
+    WRITE_CHAR_UUID = "00002ADD-0000-1000-8000-00805F9B34FB"  # Mesh Provisioning Data In
+    NOTIFY_CHAR_UUID = "00002ADE-0000-1000-8000-00805F9B34FB"  # Mesh Provisioning Data Out
 
     def __init__(self):
         self.sequence = 1
