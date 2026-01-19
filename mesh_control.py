@@ -2,10 +2,9 @@
 Sends control commands through the mesh network
 """
 
-import asyncio
 import logging
 import struct
-import subprocess
+import pexpect
 from typing import Optional, List
 from pathlib import Path
 import json
@@ -68,61 +67,45 @@ class MeshLightController:
             # Use first node as default
             return list(nodes.values())[0]
 
-    def _send_mesh_message(self, dest_addr: int, model_id: int, opcode: int,
-                          payload: bytes, timeout: int = 10) -> bool:
+    def _run_meshctl_commands(self, commands: List[str], timeout: int = 30) -> tuple[bool, str]:
         """
-        Send a mesh message using mesh-cfgclient
+        Run mesh-cfgclient commands interactively
 
         Args:
-            dest_addr: Destination unicast address
-            model_id: Model ID to target
-            opcode: Message opcode
-            payload: Message payload bytes
-            timeout: Command timeout
+            commands: List of commands to execute
+            timeout: Timeout in seconds
 
         Returns:
-            True if successful
+            (success, output)
         """
-        # Convert payload to hex string
-        payload_hex = payload.hex() if payload else ""
-
-        # Build mesh-cfgclient command
-        commands = [
-            "menu config",
-            f"target {dest_addr:04x}",
-            f"send {opcode:02x} {payload_hex}",
-            "menu main"
-        ]
-
-        cmd_script = "\n".join(commands) + "\nquit\n"
-
-        logger.debug(f"Sending mesh message: dest=0x{dest_addr:04x}, opcode=0x{opcode:02x}, payload={payload_hex}")
+        logger.debug(f"Running mesh-cfgclient commands: {commands}")
 
         try:
-            process = subprocess.Popen(
-                ['mesh-cfgclient'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+            child = pexpect.spawn('mesh-cfgclient', timeout=timeout, encoding='utf-8')
 
-            stdout, stderr = process.communicate(input=cmd_script, timeout=timeout)
+            # Wait for initial prompt
+            child.expect(r'\[mesh-cfgclient\]>', timeout=10)
+            output = child.before + child.after
 
-            if process.returncode == 0:
-                logger.info(f"Mesh message sent successfully")
-                return True
-            else:
-                logger.error(f"Failed to send mesh message: {stderr}")
-                return False
+            for cmd in commands:
+                logger.debug(f"Sending: {cmd}")
+                child.sendline(cmd)
+                child.expect(r'\[mesh-cfgclient\]>', timeout=10)
+                output += child.before + child.after
 
-        except subprocess.TimeoutExpired:
-            process.kill()
-            logger.error(f"Mesh command timed out after {timeout}s")
-            return False
+            child.sendline('quit')
+            child.expect(pexpect.EOF, timeout=5)
+            output += child.before if child.before else ''
+            child.close()
+
+            return True, output
+
+        except pexpect.exceptions.TIMEOUT:
+            logger.error("mesh-cfgclient timed out")
+            return False, ""
         except Exception as e:
-            logger.error(f"Failed to send mesh message: {e}")
-            return False
+            logger.error(f"Failed to run mesh-cfgclient: {e}")
+            return False, str(e)
 
     def _send_generic_level(self, dest_addr: int, level: int, tid: int = 0) -> bool:
         """
@@ -188,7 +171,17 @@ class MeshLightController:
 
         logger.info(f"Setting brightness to {brightness}% (level={level}) on node 0x{dest_addr:04x}")
 
-        return self._send_generic_level(dest_addr, level)
+        # Use level menu for brightness control
+        commands = [
+            "menu level",
+            f"target {dest_addr:04x}",
+            f"set {level}",
+            "back"
+        ]
+
+        success, output = self._run_meshctl_commands(commands)
+        logger.debug(f"Brightness output: {output}")
+        return success
 
     def set_color_temp(self, kelvin: int, address: Optional[str] = None) -> bool:
         """
@@ -266,15 +259,18 @@ class MeshLightController:
         node = self._get_target_node(address)
         dest_addr = node['unicast_address']
 
-        # Generic OnOff Set Unacknowledged opcode
-        opcode = 0x8203
-
-        # Payload: onoff (1 byte) + tid (1 byte)
-        payload = struct.pack('BB', 1 if on else 0, 0)
-
         logger.info(f"Turning light {'on' if on else 'off'} on node 0x{dest_addr:04x}")
 
-        return self._send_mesh_message(dest_addr, self.GENERIC_ONOFF_MODEL, opcode, payload)
+        commands = [
+            "menu onoff",
+            f"target {dest_addr:04x}",
+            "on" if on else "off",
+            "back"
+        ]
+
+        success, output = self._run_meshctl_commands(commands)
+        logger.debug(f"Power output: {output}")
+        return success
 
     def list_nodes(self) -> List[dict]:
         """
