@@ -17,31 +17,40 @@ from gatt import GattController
 HELP_TEXT = """\
 Zyvega - Zhiyun Light Controller
 
-BLE commands (direct GATT control):
-  ble scan [secs]       Scan for Zhiyun lights (0xFEE9 service)
-  ble connect <idx|mac> Connect to a light
-  ble disconnect        Disconnect
-  ble status            Show connection state
-  ble raw <hex>         Send raw bytes (no framing)
-  ble send <cid> [hex]  Send framed ZYBL command (e.g. ble send 2003)
-  ble info              Query device info (CID 0x2003)
+Light control:
+  brightness <0-100>        Set brightness (percent)
+  cct <2700-6500>           Set color temperature (Kelvin)
+  sat <0-100>               Set saturation (percent)
+  hsi <hue> <sat> <int>     Set HSI (hue 0-360, sat 0-100, intensity 0-100)
+  get brightness            Query current brightness
+  get cct                   Query current color temperature
+  get info                  Query device info (serial, model)
+  get devid                 Query device ID (CID 0x2005)
+
+BLE commands:
+  ble scan [secs]           Scan for Zhiyun lights (0xFEE9 service)
+  ble connect <idx|mac>     Connect to a light
+  ble disconnect            Disconnect
+  ble status                Show connection state
+  ble raw <hex>             Send raw bytes (no framing)
+  ble send <cid> [hex]      Send framed ZYBL command (e.g. ble send 2003)
 
 Mesh commands (requires bluetooth-mesh.service):
-  mesh start            Connect to mesh daemon
-  mesh scan [secs]      Scan for unprovisioned devices
-  mesh provision <idx>  Provision device by scan index
-  mesh configure <addr> Get composition data, add app key, bind
-  mesh nodes            List provisioned nodes
-  mesh reset            Delete network and start fresh
+  mesh start                Connect to mesh daemon
+  mesh scan [secs]          Scan for unprovisioned devices
+  mesh provision <idx>      Provision device by scan index
+  mesh configure <addr>     Get composition data, add app key, bind
+  mesh nodes                List provisioned nodes
+  mesh reset                Delete network and start fresh
 
-  quit                  Exit
+  quit                      Exit
 """
 
 
 def handle_ble_command(gatt, parts):
     """Handle 'ble <subcommand>' commands."""
     if len(parts) < 2:
-        print("Usage: ble <scan|connect|disconnect|status|raw|send|info> ...")
+        print("Usage: ble <scan|connect|disconnect|status|raw|send> ...")
         return
 
     sub = parts[1].lower()
@@ -105,9 +114,6 @@ def handle_ble_command(gatt, parts):
                 print("Invalid payload hex.")
                 return
         gatt.send_command(cid, payload)
-
-    elif sub == "info":
-        gatt.send_command(0x2003)
 
     else:
         print(f"Unknown ble subcommand: {sub}")
@@ -182,6 +188,75 @@ def handle_mesh_command(state, parts):
         print(f"Unknown mesh subcommand: {sub}")
 
 
+def handle_light_command(gatt, cmd, parts):
+    """Handle top-level light control commands."""
+    if cmd == "brightness":
+        if len(parts) < 2:
+            print("Usage: brightness <0-100>")
+            return
+        try:
+            value = float(parts[1])
+        except ValueError:
+            print("Usage: brightness <0-100>")
+            return
+        gatt.set_brightness(value)
+
+    elif cmd == "cct":
+        if len(parts) < 2:
+            print("Usage: cct <2700-6500>")
+            return
+        try:
+            kelvin = int(parts[1])
+        except ValueError:
+            print("Usage: cct <2700-6500>")
+            return
+        gatt.set_cct(kelvin)
+
+    elif cmd == "sat":
+        if len(parts) < 2:
+            print("Usage: sat <0-100>")
+            return
+        try:
+            value = float(parts[1])
+        except ValueError:
+            print("Usage: sat <0-100>")
+            return
+        gatt.set_saturation(value)
+
+    elif cmd == "hsi":
+        if len(parts) < 4:
+            print("Usage: hsi <hue 0-360> <saturation 0-100> <intensity 0-100>")
+            return
+        try:
+            hue = float(parts[1])
+            sat = float(parts[2]) / 100.0
+            intensity = int(parts[3])
+        except ValueError:
+            print("Usage: hsi <hue 0-360> <saturation 0-100> <intensity 0-100>")
+            return
+        gatt.set_hsi(hue, sat, intensity)
+
+    elif cmd in ("info", "get"):
+        if cmd == "info":
+            what = "info"
+        elif len(parts) < 2:
+            print("Usage: get <brightness|cct|info>")
+            return
+        else:
+            what = parts[1].lower()
+
+        if what in ("brightness", "bright", "b"):
+            gatt.get_brightness()
+        elif what in ("cct", "temp", "t"):
+            gatt.get_cct()
+        elif what == "info":
+            gatt.query_info()
+        elif what in ("devid", "deviceid", "id"):
+            gatt.query_device_id()
+        else:
+            print(f"Unknown get target: {what}. Try: brightness, cct, info, devid")
+
+
 def handle_command(state, line):
     """Parse and dispatch a CLI command."""
     parts = line.strip().split()
@@ -201,6 +276,9 @@ def handle_command(state, line):
 
     elif cmd == "mesh":
         handle_mesh_command(state, parts)
+
+    elif cmd in ("brightness", "cct", "sat", "hsi", "get", "info"):
+        handle_light_command(state["gatt"], cmd, parts)
 
     else:
         print(f"Unknown command: {cmd}. Type 'help' for available commands.")

@@ -12,6 +12,19 @@ import struct
 import dbus
 from gi.repository import GLib
 
+# --- ZYBL command IDs ---
+
+CID_BRIGHTNESS = 0x1001
+CID_CCT = 0x1002
+CID_SATURATION = 0x1005
+CID_CHROMA = 0x1007
+CID_HSI = 0x100A
+CID_BRIGHTNESS_MODE = 0x100B
+CID_VOLTAGE = 0x2001
+CID_DEVICE_INFO = 0x2003
+CID_DEVICE_ID = 0x2005
+CID_ONLINE = 0xFFFF
+
 # BlueZ D-Bus constants
 BLUEZ_SERVICE = "org.bluez"
 ADAPTER_PATH = "/org/bluez/hci0"
@@ -92,6 +105,88 @@ def zybl_parse(raw):
     return (seq, cid, payload)
 
 
+# --- ZYBL payload builders ---
+
+
+def _control_payload(device_id, value_bytes):
+    """Build a control (write) payload: device_id(u16 LE) + 0x01 + value."""
+    return struct.pack("<HB", device_id, 0x01) + value_bytes
+
+
+def _query_payload(device_id, value_len):
+    """Build a query (read) payload: device_id(u16 LE) + 0x00 + zeroes."""
+    return struct.pack("<HB", device_id, 0x00) + b"\x00" * value_len
+
+
+# --- ZYBL response parsing ---
+
+
+CID_NAMES = {
+    CID_BRIGHTNESS: "brightness",
+    CID_CCT: "cct",
+    CID_SATURATION: "saturation",
+    CID_CHROMA: "chroma",
+    CID_HSI: "hsi",
+    CID_BRIGHTNESS_MODE: "brightness+mode",
+    CID_VOLTAGE: "voltage",
+    CID_DEVICE_INFO: "device_info",
+    CID_DEVICE_ID: "device_id",
+    CID_ONLINE: "online_status",
+}
+
+
+def parse_response(cid, payload):
+    """Parse a ZYBL response payload by CID. Returns a human-readable string."""
+    name = CID_NAMES.get(cid, f"0x{cid:04x}")
+
+    if cid == CID_DEVICE_INFO:
+        # payload is null-terminated strings: serial + model + ...
+        parts = payload.split(b"\x00")
+        strings = [p.decode("ascii", errors="replace") for p in parts if p]
+        if len(strings) >= 2:
+            return f"[{name}] serial={strings[0]} model={strings[1]}"
+        return f"[{name}] {strings}"
+
+    # Control responses have: device_id(u16) + write_flag(u8) + value
+    if len(payload) < 3:
+        return f"[{name}] payload={payload.hex()}"
+
+    device_id = struct.unpack_from("<H", payload, 0)[0]
+    flag = payload[2]
+    value = payload[3:]
+
+    if cid == CID_BRIGHTNESS and len(value) >= 4:
+        bright = struct.unpack_from("<f", value, 0)[0]
+        return f"[{name}] device={device_id} brightness={bright:.0f}%"
+
+    if cid == CID_CCT and len(value) >= 2:
+        kelvin = struct.unpack_from("<H", value, 0)[0]
+        return f"[{name}] device={device_id} cct={kelvin}K"
+
+    if cid == CID_SATURATION and len(value) >= 4:
+        sat = struct.unpack_from("<f", value, 0)[0]
+        return f"[{name}] device={device_id} saturation={sat:.0f}%"
+
+    if cid == CID_HSI and len(value) >= 10:
+        hue, sat, intensity = struct.unpack_from("<ffH", value, 0)
+        return f"[{name}] device={device_id} hue={hue:.1f} sat={sat:.0f}% intensity={intensity}"
+
+    if cid == CID_BRIGHTNESS_MODE and len(value) >= 5:
+        bright = struct.unpack_from("<f", value, 0)[0]
+        mode = struct.unpack_from("<b", value, 4)[0]
+        return f"[{name}] device={device_id} brightness={bright:.0f}% mode={mode}"
+
+    if cid == CID_VOLTAGE and len(value) >= 2:
+        voltage = struct.unpack_from("<H", value, 0)[0]
+        return f"[{name}] device={device_id} voltage={voltage}"
+
+    if cid == CID_ONLINE and len(value) >= 2:
+        online = struct.unpack_from("<H", value, 0)[0]
+        return f"[{name}] device={device_id} online={bool(online)}"
+
+    return f"[{name}] device={device_id} flag={flag:#x} value={value.hex()}"
+
+
 class GattController:
     """Direct BLE GATT controller for Zhiyun lights via BlueZ D-Bus."""
 
@@ -99,8 +194,9 @@ class GattController:
         self._bus = bus
         self._state = STATE_DISCONNECTED
         self._seq = 0
+        self._device_id = None  # mfid from BLE advertisement (u16)
 
-        # Discovered devices: list of (path, name, mac, rssi)
+        # Discovered devices: list of (path, name, mac, rssi, mfid)
         self._discovered = []
 
         # Connected device state
@@ -199,16 +295,27 @@ class GattController:
             return
 
         # Skip duplicates
-        for _, _, mac, _ in self._discovered:
+        for _, _, mac, _, _ in self._discovered:
             if mac == str(props.get("Address", "")):
                 return
 
         name = str(props.get("Name", props.get("Alias", "Unknown")))
         mac = str(props.get("Address", "??:??:??:??:??:??"))
         rssi = int(props.get("RSSI", 0))
+
+        # Extract mfid from ManufacturerData (device_id for ZYBL protocol)
+        # In BlueZ, ManufacturerData is {company_id: data_bytes}.
+        # The app reads mfid from raw adv bytes[0:2] which IS the company_id.
+        mfid = None
+        mfg_data = props.get("ManufacturerData", {})
+        for company_id, data in mfg_data.items():
+            mfid = int(company_id)
+            break
+
         idx = len(self._discovered)
-        self._discovered.append((str(path), name, mac, rssi))
-        print(f"  [{idx}] {name}  {mac}  RSSI={rssi}")
+        self._discovered.append((str(path), name, mac, rssi, mfid))
+        mfid_str = f"  mfid={mfid:#06x}" if mfid is not None else ""
+        print(f"  [{idx}] {name}  {mac}  RSSI={rssi}{mfid_str}")
 
     # --- Connection ---
 
@@ -229,6 +336,9 @@ class GattController:
                 print(f"[ble] Invalid index {target}. Run 'ble scan' first.")
                 return
             device_path = self._discovered[target][0]
+            mfid = self._discovered[target][4]
+            if mfid is not None:
+                print(f"[ble] Model ID (mfid): {mfid:#06x}")
             print(f"[ble] Connecting to {self._discovered[target][1]} ({self._discovered[target][2]})...")
         else:
             # MAC address — convert to BlueZ path
@@ -360,7 +470,8 @@ class GattController:
         parsed = zybl_parse(value)
         if parsed:
             seq, cid, payload = parsed
-            print(f"[ble]    seq={seq} cid={cid:#06x} payload={payload.hex()}")
+            info = parse_response(cid, payload)
+            print(f"[ble]    {info}")
         else:
             print(f"[ble]    (not a valid ZYBL frame)")
 
@@ -396,6 +507,7 @@ class GattController:
         self._device_path = None
         self._write_char_path = None
         self._read_char_path = None
+        self._device_id = None
         self._state = STATE_DISCONNECTED
 
     # --- Writing ---
@@ -438,3 +550,64 @@ class GattController:
             print(f"[ble] Read char:  {self._read_char_path}")
         if self._discovered:
             print(f"[ble] Discovered: {len(self._discovered)} device(s)")
+
+    # --- High-level light control ---
+
+    def _get_device_id(self):
+        """Get device_id for control commands.
+
+        Uses the value from CID 0x2005 query if available, otherwise 0.
+        Note: mfid from BLE advertisement (e.g. 0x0905) is the MODEL id,
+        not the device_id used in control payloads.
+        """
+        if self._device_id is not None:
+            return self._device_id
+        return 0
+
+    def set_brightness(self, value):
+        """Set brightness. value: 0-100 (percent)."""
+        value = max(0.0, min(100.0, float(value)))
+        payload = _control_payload(self._get_device_id(), struct.pack("<f", value))
+        self.send_command(CID_BRIGHTNESS, payload)
+        print(f"[ble] Setting brightness to {value:.0f}%")
+
+    def get_brightness(self):
+        """Query current brightness."""
+        payload = _query_payload(self._get_device_id(), 4)
+        self.send_command(CID_BRIGHTNESS, payload)
+
+    def set_cct(self, kelvin):
+        """Set color temperature in Kelvin (2700-6500)."""
+        kelvin = max(2700, min(6500, int(kelvin)))
+        payload = _control_payload(self._get_device_id(), struct.pack("<H", kelvin))
+        self.send_command(CID_CCT, payload)
+        print(f"[ble] Setting CCT to {kelvin}K")
+
+    def get_cct(self):
+        """Query current color temperature."""
+        payload = _query_payload(self._get_device_id(), 2)
+        self.send_command(CID_CCT, payload)
+
+    def set_saturation(self, value):
+        """Set saturation. value: 0-100 (percent)."""
+        value = max(0.0, min(100.0, float(value)))
+        payload = _control_payload(self._get_device_id(), struct.pack("<f", value))
+        self.send_command(CID_SATURATION, payload)
+        print(f"[ble] Setting saturation to {value:.0f}%")
+
+    def set_hsi(self, hue, saturation, intensity):
+        """Set HSI color. hue: 0-360, saturation: 0.0-1.0, intensity: 0-100."""
+        payload = _control_payload(
+            self._get_device_id(),
+            struct.pack("<ffH", float(hue), float(saturation), int(intensity)),
+        )
+        self.send_command(CID_HSI, payload)
+        print(f"[ble] Setting HSI: hue={hue:.1f} sat={saturation:.1%} intensity={intensity}")
+
+    def query_info(self):
+        """Query device info (serial, model)."""
+        self.send_command(CID_DEVICE_INFO)
+
+    def query_device_id(self):
+        """Query device ID via CID 0x2005 (no-payload command)."""
+        self.send_command(CID_DEVICE_ID)
