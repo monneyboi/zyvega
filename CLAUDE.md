@@ -93,9 +93,6 @@ Total frame size = payload_size + 12 bytes (confirmed from `Pack()` allocation).
 Responses use the same framing. Implemented in `gatt.py` as `zybl_frame()` and
 `zybl_parse()`.
 
-**NOTE**: `gatt.py` currently uses field1=0x0001 which may be wrong — the binary
-uses 0x0100. Needs verification against actual hardware.
-
 ### ZYBL payload format (from libzylink.so reverse engineering)
 
 The payload (after the CID in the data section) has this structure:
@@ -104,8 +101,10 @@ The payload (after the CID in the data section) has this structure:
 [device_id (u16 LE)] [write_flag (u8)] [value_bytes...]
 ```
 
-- **device_id**: target device ID (u16 LE)
-- **write_flag**: `0x00` for read/query, `0x33` for write/control
+- **device_id**: target device ID — defaults to `0` (working value; mfid from
+  BLE advertisement e.g. 0x0905 is the MODEL id, not the device_id)
+- **write_flag**: `0x00` for read/query, `0x01` for write/control (the config
+  file's `controlMode: "0x33"` is converted to boolean 1 in the JNI layer)
 - **value_bytes**: CID-specific data (see table below)
 
 For **read/query** commands: write_flag = 0x00, value bytes are zero-filled.
@@ -115,7 +114,7 @@ For **no-payload** commands (0x2003, 0x2005): no device_id/write_flag at all.
 
 | CID    | Name           | Value format after write_flag              | Size |
 |--------|----------------|---------------------------------------------|------|
-| 0x1001 | Brightness     | float32 LE (0.0–1.0)                       | 4    |
+| 0x1001 | Brightness     | float32 LE (0–100, percent)                 | 4    |
 | 0x1002 | Color Temp     | u16 LE kelvin (2700–6500)                   | 2    |
 | 0x1005 | Saturation     | float32 LE                                  | 4    |
 | 0x1007 | Chroma Coord   | u8 gamut + float32 x + float32 y            | 9    |
@@ -141,9 +140,9 @@ Their native payload formats were not decompiled yet but likely follow the same
 00 01                 field1 (0x0100 LE)
 01 00                 seq = 1
 01 10                 cid = 0x1001
-01 00                 device_id = 1
-33                    write_flag = 0x33 (control mode)
-00 00 00 3F           float32 LE 0.5
+00 00                 device_id = 0
+01                    write_flag = 0x01 (write/control)
+00 00 48 42           float32 LE 50.0
 XX XX                 CRC-16/XMODEM over data section
 ```
 
@@ -221,9 +220,6 @@ supported CIDs. Example for PL103 (`1.6.4.config`):
 - Device capabilities per model/firmware
 
 ### Needs verification
-- **field1 value**: Binary uses 0x0100, gatt.py uses 0x0001 — test against hardware
-- **write_flag value**: Assumed 0x33 from config files' `controlMode` — verify
-- **device_id**: What value to use (0x0001? 0x0000? from provisioning?)
 - **RGB, Hue, CMY payload formats**: Not yet decompiled from libzylink.so
 - **Response payload parsing**: How response payloads map to the Java Bundle keys
 
@@ -237,13 +233,13 @@ supported CIDs. Example for PL103 (`1.6.4.config`):
 5. Read composition data — discovered company=0x0059, vendor model=0x0002
 6. Add app key and bind to vendor model
 
-### Phase 2: Direct BLE control (current)
+### Phase 2: Direct BLE control (complete)
 7. Connect to light via standard BLE (0xFEE9 service) — **done** (`gatt.py`)
 8. Implement ZYBL wire protocol (framing, CRC) — **done** (`gatt.py`)
 9. Reverse-engineer payload format from `libzylink.so` — **done**
-10. Fix field1 value in gatt.py (0x0100 vs 0x0001) — verify against hardware
-11. Implement brightness (0x1001) and CCT (0x1002) commands with payload encoding
-12. Parse responses
+10. field1=0x0100, write_flag=0x01, device_id=0 — **done** (verified against hardware)
+11. Implement brightness (0x1001) and CCT (0x1002) commands — **done**
+12. Parse responses — **done**
 
 ### Phase 3: Extended features
 12. RGB, HSI, CMY control for color models
