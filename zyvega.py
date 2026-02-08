@@ -110,9 +110,7 @@ class MeshApplication(dbus.service.Object):
                 "Models": dbus.Array([
                     dbus.Struct((dbus.UInt16(0x0001), dbus.Dictionary({}, signature="sv")), signature="qa{sv}"),  # Config Client
                 ], signature="(qa{sv})"),
-                "VendorModels": dbus.Array([
-                    dbus.Struct((dbus.UInt16(0x0059), dbus.UInt16(0x0002), dbus.Dictionary({}, signature="sv")), signature="qqa{sv}"),
-                ], signature="(qqa{sv})"),
+                "VendorModels": dbus.Array([], signature="(qqa{sv})"),
                 "Location": dbus.UInt16(0x0000),
             }
         }
