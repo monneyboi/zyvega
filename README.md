@@ -20,7 +20,6 @@ required for controlling them.
 ## Requirements
 
 - Python 3.12+
-- [uv](https://github.com/astral-sh/uv) package manager
 - BlueZ (the `bluetoothd` service must be running)
 - System packages: `dbus-python`, `python-gobject` (PyGObject)
 - For mesh commands only: `bluetooth-mesh.service` (BlueZ meshd)
@@ -34,11 +33,10 @@ sudo pacman -S python-dbus python-gobject bluez
 ## Usage
 
 ```
-uv run main.py
+python main.py
 ```
 
-This drops you into an interactive shell. Mesh commands require root
-(`sudo uv run main.py`).
+This drops you into an interactive shell.
 
 ### Controlling a light
 
@@ -88,10 +86,8 @@ Scan for nearby Zhiyun lights, connect, and start controlling:
 | `ble connect <index\|mac>` | Connect by scan index or MAC address |
 | `ble disconnect` | Disconnect |
 | `ble status` | Show connection state |
-| `ble raw <hex>` | Send raw bytes (no framing) |
-| `ble send <cid> [hex]` | Send a framed ZYBL command by CID |
 
-**Mesh** (requires `bluetooth-mesh.service` and root):
+**Mesh** (requires `bluetooth-mesh.service`):
 
 | Command | Description |
 |---|---|
@@ -101,25 +97,6 @@ Scan for nearby Zhiyun lights, connect, and start controlling:
 | `mesh configure <addr>` | Get composition data, add app key, bind model |
 | `mesh nodes` | List provisioned nodes |
 | `mesh reset` | Delete the network and start fresh |
-
-### Low-level debugging
-
-You can send arbitrary ZYBL frames with `ble send`. The tool handles framing
-(header, length, CRC) automatically -- you just provide the CID and optional
-payload bytes:
-
-```
-> ble send 2003
-```
-
-This sends a device info query (CID 0x2003, no payload). Responses are parsed
-and printed automatically.
-
-For completely raw writes (no framing at all), use `ble raw`:
-
-```
-> ble raw 243c0a0001000100032000001234
-```
 
 ## Protocol overview
 

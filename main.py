@@ -30,8 +30,6 @@ BLE commands:
   ble connect <idx|mac>     Connect to a light
   ble disconnect            Disconnect
   ble status                Show connection state
-  ble raw <hex>             Send raw bytes (no framing)
-  ble send <cid> [hex]      Send framed ZYBL command (e.g. ble send 2003)
 
 Mesh commands (requires bluetooth-mesh.service):
   mesh start                Connect to mesh daemon
@@ -48,7 +46,7 @@ Mesh commands (requires bluetooth-mesh.service):
 def handle_ble_command(gatt, parts):
     """Handle 'ble <subcommand>' commands."""
     if len(parts) < 2:
-        print("Usage: ble <scan|connect|disconnect|status|raw|send> ...")
+        print("Usage: ble <scan|connect|disconnect|status> ...")
         return
 
     sub = parts[1].lower()
@@ -81,37 +79,6 @@ def handle_ble_command(gatt, parts):
 
     elif sub == "status":
         gatt.status()
-
-    elif sub == "raw":
-        if len(parts) < 3:
-            print("Usage: ble raw <hex bytes>")
-            return
-        hex_str = "".join(parts[2:]).replace("-", "").replace(":", "")
-        try:
-            data = bytes.fromhex(hex_str)
-        except ValueError:
-            print("Invalid hex string.")
-            return
-        gatt.write_raw(data)
-
-    elif sub == "send":
-        if len(parts) < 3:
-            print("Usage: ble send <cid_hex> [payload_hex]")
-            return
-        try:
-            cid = int(parts[2], 16)
-        except ValueError:
-            print("CID must be hex (e.g. 1001, 2003).")
-            return
-        payload = b""
-        if len(parts) > 3:
-            hex_str = "".join(parts[3:]).replace("-", "").replace(":", "")
-            try:
-                payload = bytes.fromhex(hex_str)
-            except ValueError:
-                print("Invalid payload hex.")
-                return
-        gatt.send_command(cid, payload)
 
     else:
         print(f"Unknown ble subcommand: {sub}")
