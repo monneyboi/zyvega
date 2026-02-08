@@ -1,4 +1,4 @@
-"""Bluetooth Mesh interface for PL103 Video Light using D-Bus directly"""
+"""Bluetooth Mesh interface for PL103 Video Light using D-Bus"""
 
 import asyncio
 import logging
@@ -9,84 +9,247 @@ from pathlib import Path
 from typing import Optional, List
 
 from dbus_next.aio import MessageBus
+from dbus_next.service import ServiceInterface, method, dbus_property
+from dbus_next.constants import PropertyAccess
 from dbus_next import BusType, Variant
 
 logger = logging.getLogger(__name__)
+
+
+class ObjectManager(ServiceInterface):
+    """D-Bus ObjectManager interface required by BlueZ"""
+
+    def __init__(self, objects: dict):
+        super().__init__("org.freedesktop.DBus.ObjectManager")
+        self._objects = objects
+
+    @method()
+    def GetManagedObjects(self) -> "a{oa{sa{sv}}}":
+        return self._objects
+
+
+class MeshApplication(ServiceInterface):
+    """D-Bus Application interface for BlueZ mesh"""
+
+    def __init__(self):
+        super().__init__("org.bluez.mesh.Application1")
+        self._token = None
+
+    @method()
+    def JoinComplete(self, token: "t"):
+        logger.info(f"JoinComplete: token={token}")
+        self._token = token
+
+    @method()
+    def JoinFailed(self, reason: "s"):
+        logger.error(f"JoinFailed: {reason}")
+
+    @dbus_property(access=PropertyAccess.READ)
+    def CompanyID(self) -> "q":
+        return 0x05F1  # Linux Foundation
+
+    @dbus_property(access=PropertyAccess.READ)
+    def ProductID(self) -> "q":
+        return 0x0001
+
+    @dbus_property(access=PropertyAccess.READ)
+    def VersionID(self) -> "q":
+        return 0x0001
+
+
+class MeshProvisionAgent(ServiceInterface):
+    """D-Bus Provisioning Agent for BlueZ mesh - NoOOB mode"""
+
+    def __init__(self):
+        super().__init__("org.bluez.mesh.ProvisionAgent1")
+
+    @method()
+    def PrivateKey(self) -> "ay":
+        return secrets.token_bytes(32)
+
+    @method()
+    def PublicKey(self) -> "ay":
+        return secrets.token_bytes(64)
+
+    @method()
+    def DisplayString(self, value: "s"):
+        logger.info(f"Display: {value}")
+
+    @method()
+    def DisplayNumeric(self, type: "s", number: "u"):
+        logger.info(f"Display {type}: {number}")
+
+    @method()
+    def PromptNumeric(self, type: "s") -> "u":
+        return 0
+
+    @method()
+    def PromptStatic(self, type: "s") -> "ay":
+        # NoOOB: return 16 zero bytes if somehow called
+        logger.info(f"PromptStatic: returning zeros (NoOOB)")
+        return bytes(16)
+
+    @method()
+    def Cancel(self):
+        logger.info("Provisioning cancelled")
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Capabilities(self) -> "as":
+        return []  # Empty = NoOOB only
+
+
+class MeshElement(ServiceInterface):
+    """D-Bus Element interface"""
+
+    def __init__(self, index: int):
+        super().__init__("org.bluez.mesh.Element1")
+        self._index = index
+
+    @method()
+    def MessageReceived(self, source: "q", key_index: "q", destination: "v", data: "ay"):
+        logger.debug(f"Message from 0x{source:04x}: {bytes(data).hex()}")
+
+    @method()
+    def DevKeyMessageReceived(self, source: "q", remote: "b", net_index: "q", data: "ay"):
+        logger.debug(f"DevKey message from 0x{source:04x}: {bytes(data).hex()}")
+
+    @method()
+    def UpdateModelConfiguration(self, model_id: "q", config: "a{sv}"):
+        pass
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Index(self) -> "y":
+        return self._index
+
+    @dbus_property(access=PropertyAccess.READ)
+    def Models(self) -> "aq":
+        # Generic OnOff Client, Generic Level Client
+        return [0x1001, 0x1003]
 
 
 class ZyvegaMesh:
     """Unified mesh interface - provisioning and control"""
 
     # Constants
-    OOB_KEY = bytes.fromhex("CABF7E4AC8B9E254372BBD6146D318BB")
     ZHIYUN_VENDOR_ID = 0x0905
     ZHIYUN_DEVICE_ID = 0x0380
-
-    # Vendor opcodes
     VENDOR_OPCODE_COLOR_TEMP = 0x1002
     VENDOR_OPCODE_RGB = 0x1003
 
-    # Configuration
     CONFIG_DIR = Path.home() / ".config" / "zyvega" / "mesh"
-    NETWORK_NAME = "zyvega_mesh"
-
-    # D-Bus paths
     MESH_SERVICE = "org.bluez.mesh"
     MESH_PATH = "/org/bluez/mesh"
+    APP_PATH = "/org/zyvega/mesh"
 
     def __init__(self):
-        self.config_file = self.CONFIG_DIR / f"{self.NETWORK_NAME}.json"
+        self.config_file = self.CONFIG_DIR / f"network.json"
         self._bus: Optional[MessageBus] = None
         self._token: Optional[int] = None
         self._node_path: Optional[str] = None
-        self._unprovisioned_devices: List[dict] = []
+        self._app_registered = False
 
     def _ensure_config_dir(self):
-        """Ensure configuration directory exists"""
         self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     def _load_config(self) -> dict:
-        """Load mesh network configuration"""
         if not self.config_file.exists():
-            return {"network_name": self.NETWORK_NAME, "nodes": {}}
+            return {"nodes": {}}
         with open(self.config_file, "r") as f:
             return json.load(f)
 
     def _save_config(self, config: dict):
-        """Save mesh network configuration"""
         self._ensure_config_dir()
         with open(self.config_file, "w") as f:
             json.dump(config, f, indent=2)
 
     async def _get_bus(self) -> MessageBus:
-        """Get D-Bus system connection"""
         if self._bus is None:
             self._bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
         return self._bus
 
+    async def _register_application(self):
+        """Register our application objects on D-Bus"""
+        if self._app_registered:
+            return
+
+        bus = await self._get_bus()
+
+        ele_path = self.APP_PATH + "/ele00"
+        agent_path = self.APP_PATH + "/agent"
+
+        # Build managed objects for ObjectManager
+        managed_objects = {
+            self.APP_PATH: {
+                "org.bluez.mesh.Application1": {
+                    "CompanyID": Variant("q", 0x05F1),
+                    "ProductID": Variant("q", 0x0001),
+                    "VersionID": Variant("q", 0x0001),
+                }
+            },
+            ele_path: {
+                "org.bluez.mesh.Element1": {
+                    "Index": Variant("y", 0),
+                    "Models": Variant("aq", [0x1001, 0x1003]),
+                }
+            },
+            agent_path: {
+                "org.bluez.mesh.ProvisionAgent1": {
+                    "Capabilities": Variant("as", []),  # NoOOB
+                }
+            },
+        }
+
+        # Export ObjectManager
+        obj_mgr = ObjectManager(managed_objects)
+        bus.export(self.APP_PATH, obj_mgr)
+
+        # Export application
+        self._app = MeshApplication()
+        bus.export(self.APP_PATH, self._app)
+
+        # Export provisioning agent
+        agent = MeshProvisionAgent()
+        bus.export(agent_path, agent)
+
+        # Export element
+        element = MeshElement(0)
+        bus.export(ele_path, element)
+
+        self._app_registered = True
+        logger.debug("Registered mesh application on D-Bus")
+
     async def _get_interface(self, path: str, interface: str):
-        """Get a D-Bus interface proxy"""
         bus = await self._get_bus()
         introspection = await bus.introspect(self.MESH_SERVICE, path)
         proxy = bus.get_proxy_object(self.MESH_SERVICE, path, introspection)
         return proxy.get_interface(interface)
 
-    # --- Network Management ---
-
     async def create_network(self) -> bool:
         """Create a new mesh network"""
         try:
+            await self._register_application()
+
             network_iface = await self._get_interface(
                 self.MESH_PATH, "org.bluez.mesh.Network1"
             )
 
             app_uuid = secrets.token_bytes(16)
+            logger.debug(f"Creating network with app_path={self.APP_PATH}, uuid={app_uuid.hex()}")
 
-            # CreateNetwork returns token
-            token = await network_iface.call_create_network(
-                app_uuid,
-                {}  # options
+            # CreateNetwork(object app, array{byte} uuid) -> returns void, result via JoinComplete
+            await network_iface.call_create_network(
+                self.APP_PATH,
+                app_uuid
             )
+
+            # Wait for JoinComplete callback
+            await asyncio.sleep(2)
+
+            if self._app._token is None:
+                logger.error("JoinComplete not received")
+                return False
+
+            token = self._app._token
 
             self._token = token
             self._node_path = f"/org/bluez/mesh/node{token:016x}"
@@ -94,10 +257,9 @@ class ZyvegaMesh:
             config = self._load_config()
             config["token"] = token
             config["app_uuid"] = app_uuid.hex()
-            config["created"] = True
             self._save_config(config)
 
-            logger.info(f"Created mesh network with token: {token}")
+            logger.info(f"Created mesh network, token: {token}")
             return True
 
         except Exception as e:
@@ -111,123 +273,99 @@ class ZyvegaMesh:
         app_uuid_hex = config.get("app_uuid")
 
         if token is None or app_uuid_hex is None:
-            logger.debug("No network token/uuid found")
             return False
 
         try:
+            await self._register_application()
+
             network_iface = await self._get_interface(
                 self.MESH_PATH, "org.bluez.mesh.Network1"
             )
 
-            app_uuid = bytes.fromhex(app_uuid_hex)
-            node_path = await network_iface.call_attach(app_uuid, token)
+            # Attach(object app, uint64 token) -> (object node, dict config)
+            result = await network_iface.call_attach(self.APP_PATH, token)
+            node_path, node_config = result
 
             self._token = token
             self._node_path = node_path
-            logger.info(f"Attached to network, node path: {node_path}")
+            logger.info(f"Attached to network: {node_path}")
             return True
 
         except Exception as e:
-            logger.debug(f"Failed to attach (may need to create): {e}")
+            logger.debug(f"Attach failed: {e}")
             return False
 
     async def _ensure_network(self) -> bool:
-        """Ensure we're connected to the mesh network"""
+        if self._node_path:
+            return True
         if await self._attach_network():
             return True
         return await self.create_network()
 
     async def list_nodes(self) -> List[dict]:
-        """List all provisioned mesh nodes"""
         config = self._load_config()
         return list(config.get("nodes", {}).values())
 
     async def remove_node(self, unicast: int) -> bool:
-        """Remove a node from the mesh network"""
         try:
             if not await self._ensure_network():
                 return False
 
-            # Send Config Node Reset
-            await self._send_dev_key_message(
-                unicast,
-                bytes([0x80, 0x49])  # CONFIG_NODE_RESET opcode
-            )
+            await self._send_dev_key_message(unicast, bytes([0x80, 0x49]))
 
-            # Update config
             config = self._load_config()
             nodes = config.get("nodes", {})
             for key, node in list(nodes.items()):
                 if node.get("unicast_address") == unicast:
                     del nodes[key]
                     break
-
             self._save_config(config)
+
             logger.info(f"Removed node 0x{unicast:04x}")
             return True
-
         except Exception as e:
             logger.error(f"Failed to remove node: {e}")
             return False
-
-    # --- Provisioning ---
 
     async def scan_unprovisioned(self, timeout: float = 5.0) -> List[dict]:
         """Scan for unprovisioned mesh devices"""
         try:
             if not await self._ensure_network():
-                logger.error("Failed to connect to mesh network")
                 return []
 
-            self._unprovisioned_devices = []
-
+            devices = []
             mgmt_iface = await self._get_interface(
                 self._node_path, "org.bluez.mesh.Management1"
             )
 
-            # Set up signal handler for scan results
             bus = await self._get_bus()
 
-            def handle_message(msg):
-                if msg.member == "ScanResult" and msg.path == self._node_path:
+            def on_signal(msg):
+                if msg.member == "ScanResult":
                     rssi, data, options = msg.body
                     if len(data) >= 16:
-                        uuid = data[:16].hex().upper()
-                        oob = int.from_bytes(data[16:18], "big") if len(data) >= 18 else 0
-                        device_info = {
-                            "uuid": uuid,
-                            "rssi": rssi,
-                            "oob": oob,
-                            "name": options.get("name", Variant("s", "Unknown")).value if isinstance(options.get("name"), Variant) else options.get("name", "Unknown"),
-                        }
-                        # Deduplicate
-                        if not any(d["uuid"] == uuid for d in self._unprovisioned_devices):
-                            self._unprovisioned_devices.append(device_info)
-                            logger.info(f"Found unprovisioned device: {uuid}")
+                        uuid = bytes(data[:16]).hex().upper()
+                        if not any(d["uuid"] == uuid for d in devices):
+                            devices.append({
+                                "uuid": uuid,
+                                "rssi": rssi,
+                                "name": options.get("Name", "Unknown"),
+                            })
+                            logger.info(f"Found: {uuid}")
 
-            bus.add_message_handler(handle_message)
+            bus.add_message_handler(on_signal)
 
-            # Start scan
             await mgmt_iface.call_unprovisioned_scan(int(timeout))
             await asyncio.sleep(timeout + 0.5)
 
-            bus.remove_message_handler(handle_message)
-            return self._unprovisioned_devices
+            bus.remove_message_handler(on_signal)
+            return devices
 
         except Exception as e:
             logger.error(f"Scan failed: {e}")
             return []
 
     async def provision(self, uuid: str) -> Optional[int]:
-        """
-        Provision a device by UUID.
-
-        Args:
-            uuid: Device UUID from scan
-
-        Returns:
-            Unicast address if successful, None otherwise
-        """
         try:
             if not await self._ensure_network():
                 return None
@@ -237,38 +375,24 @@ class ZyvegaMesh:
             )
 
             config = self._load_config()
-
-            # Determine next unicast address
             nodes = config.get("nodes", {})
-            used_addrs = {n.get("unicast_address", 0) for n in nodes.values()}
-            used_addrs.add(1)  # Reserve for provisioner
+            used = {n.get("unicast_address", 0) for n in nodes.values()}
+            used.add(1)
             unicast = 2
-            while unicast in used_addrs:
+            while unicast in used:
                 unicast += 1
 
             uuid_bytes = bytes.fromhex(uuid.replace("-", ""))
 
-            # Add node with static OOB
-            await mgmt_iface.call_add_node(
-                uuid_bytes,
-                {
-                    "static-oob": Variant("ay", list(self.OOB_KEY)),
-                }
-            )
+            await mgmt_iface.call_add_node(uuid_bytes, {})  # NoOOB
 
-            # Wait for provisioning to complete
-            await asyncio.sleep(5)
+            await asyncio.sleep(8)
 
-            # Store node info
-            nodes[uuid] = {
-                "uuid": uuid,
-                "unicast_address": unicast,
-                "provisioned": True,
-            }
+            nodes[uuid] = {"uuid": uuid, "unicast_address": unicast, "provisioned": True}
             config["nodes"] = nodes
             self._save_config(config)
 
-            logger.info(f"Provisioned device {uuid} at 0x{unicast:04x}")
+            logger.info(f"Provisioned {uuid} at 0x{unicast:04x}")
             return unicast
 
         except Exception as e:
@@ -276,32 +400,20 @@ class ZyvegaMesh:
             return None
 
     async def configure(self, unicast: int) -> bool:
-        """
-        Configure a provisioned node (get composition, add app key).
-
-        Args:
-            unicast: Node unicast address
-
-        Returns:
-            True if successful
-        """
         try:
             if not await self._ensure_network():
                 return False
 
-            # Get composition data (opcode 0x8008, page 0)
-            await self._send_dev_key_message(
-                unicast,
-                bytes([0x80, 0x08, 0x00])
-            )
+            # Composition data get
+            await self._send_dev_key_message(unicast, bytes([0x80, 0x08, 0x00]))
             await asyncio.sleep(1)
 
-            # Add app key (opcode 0x00, net_idx=0, app_idx=0, key=zeros)
-            app_key_msg = bytes([0x00]) + struct.pack("<HH", 0, 0)[:3] + bytes(16)
-            await self._send_dev_key_message(unicast, app_key_msg)
+            # Add app key
+            msg = bytes([0x00]) + struct.pack("<I", 0)[:3] + bytes(16)
+            await self._send_dev_key_message(unicast, msg)
             await asyncio.sleep(0.5)
 
-            logger.info(f"Configured node 0x{unicast:04x}")
+            logger.info(f"Configured 0x{unicast:04x}")
             return True
 
         except Exception as e:
@@ -309,213 +421,91 @@ class ZyvegaMesh:
             return False
 
     async def _send_dev_key_message(self, dest: int, data: bytes):
-        """Send a message using device key"""
         node_iface = await self._get_interface(
             self._node_path, "org.bluez.mesh.Node1"
         )
+        await node_iface.call_dev_key_send(dest, True, 0, data)
 
-        await node_iface.call_dev_key_send(
-            dest,   # destination
-            True,   # remote
-            0,      # net_index
-            list(data)
+    async def _send_mesh_message(self, dest: int, data: bytes, app_idx: int = 0):
+        if not await self._ensure_network():
+            raise RuntimeError("No mesh network")
+
+        node_iface = await self._get_interface(
+            self._node_path, "org.bluez.mesh.Node1"
         )
+        await node_iface.call_send(dest, app_idx, data)
 
-    # --- Control ---
-
-    def _get_target_unicast(self, unicast: Optional[int] = None) -> int:
-        """Get target unicast address"""
+    def _get_target(self, unicast: Optional[int]) -> int:
         if unicast is not None:
             return unicast
-
         config = self._load_config()
         nodes = list(config.get("nodes", {}).values())
         if not nodes:
-            raise RuntimeError("No provisioned nodes. Run 'mesh setup' first.")
+            raise RuntimeError("No nodes. Run 'setup' first.")
         return nodes[0]["unicast_address"]
 
-    async def _send_mesh_message(self, dest: int, data: bytes, app_idx: int = 0):
-        """Send a mesh message using app key"""
-        if not await self._ensure_network():
-            raise RuntimeError("Failed to connect to mesh network")
-
-        node_iface = await self._get_interface(
-            self._node_path, "org.bluez.mesh.Node1"
-        )
-
-        await node_iface.call_send(
-            dest,       # destination
-            app_idx,    # app_index
-            list(data)  # data
-        )
-
     async def set_power(self, unicast: Optional[int], on: bool) -> bool:
-        """
-        Turn light on or off.
-
-        Args:
-            unicast: Target node address (uses first node if None)
-            on: True for on, False for off
-
-        Returns:
-            True if successful
-        """
         try:
-            dest = self._get_target_unicast(unicast)
-
-            # Generic OnOff Set Unacknowledged (opcode 0x8203)
+            dest = self._get_target(unicast)
             data = struct.pack("<HBB", 0x8203, 1 if on else 0, 0)
-
             await self._send_mesh_message(dest, data)
-            logger.info(f"Set power {'on' if on else 'off'} for 0x{dest:04x}")
             return True
-
         except Exception as e:
-            logger.error(f"Failed to set power: {e}")
+            logger.error(f"set_power failed: {e}")
             return False
 
     async def set_brightness(self, unicast: Optional[int], percent: int) -> bool:
-        """
-        Set brightness level.
-
-        Args:
-            unicast: Target node address (uses first node if None)
-            percent: Brightness percentage (0-100)
-
-        Returns:
-            True if successful
-        """
         try:
-            if not 0 <= percent <= 100:
-                raise ValueError("Brightness must be 0-100")
-
-            dest = self._get_target_unicast(unicast)
-
-            # Convert percentage to Generic Level (-32768 to 32767)
+            dest = self._get_target(unicast)
             level = int((percent / 100.0) * 65535 - 32768)
-
-            # Generic Level Set Unacknowledged (opcode 0x8206)
             data = struct.pack("<HhB", 0x8206, level, 0)
-
             await self._send_mesh_message(dest, data)
-            logger.info(f"Set brightness to {percent}% for 0x{dest:04x}")
             return True
-
         except Exception as e:
-            logger.error(f"Failed to set brightness: {e}")
+            logger.error(f"set_brightness failed: {e}")
             return False
 
     async def set_color_temp(self, unicast: Optional[int], kelvin: int) -> bool:
-        """
-        Set color temperature.
-
-        Args:
-            unicast: Target node address (uses first node if None)
-            kelvin: Color temperature (2700-6500K)
-
-        Returns:
-            True if successful
-        """
         try:
-            if not 2700 <= kelvin <= 6500:
-                raise ValueError("Color temperature must be 2700-6500K")
-
-            dest = self._get_target_unicast(unicast)
-
-            # Vendor message: 3-byte opcode + payload
-            # Opcode format: 0xC0 | (opcode_low & 0x3F), then company ID (little-endian)
+            dest = self._get_target(unicast)
             opcode = bytes([
                 0xC0 | (self.VENDOR_OPCODE_COLOR_TEMP & 0x3F),
                 self.ZHIYUN_VENDOR_ID & 0xFF,
                 (self.ZHIYUN_VENDOR_ID >> 8) & 0xFF
             ])
-
             params = struct.pack(">HH", self.ZHIYUN_DEVICE_ID, kelvin)
-            data = opcode + params
-
-            await self._send_mesh_message(dest, data)
-            logger.info(f"Set color temp to {kelvin}K for 0x{dest:04x}")
+            await self._send_mesh_message(dest, opcode + params)
             return True
-
         except Exception as e:
-            logger.error(f"Failed to set color temperature: {e}")
+            logger.error(f"set_color_temp failed: {e}")
             return False
 
-    async def set_rgb(
-        self, unicast: Optional[int], brightness: int, r: int, g: int, b: int
-    ) -> bool:
-        """
-        Set RGB color.
-
-        Args:
-            unicast: Target node address (uses first node if None)
-            brightness: Brightness percentage (0-100)
-            r: Red value (0-255)
-            g: Green value (0-255)
-            b: Blue value (0-255)
-
-        Returns:
-            True if successful
-        """
+    async def set_rgb(self, unicast: Optional[int], brightness: int, r: int, g: int, b: int) -> bool:
         try:
-            if not 0 <= brightness <= 100:
-                raise ValueError("Brightness must be 0-100")
-            if not (0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255):
-                raise ValueError("RGB values must be 0-255")
-
-            dest = self._get_target_unicast(unicast)
-
-            # Convert brightness to device value (0-10000)
-            brightness_value = int(brightness * 100)
-
-            # Vendor message opcode
+            dest = self._get_target(unicast)
             opcode = bytes([
                 0xC0 | (self.VENDOR_OPCODE_RGB & 0x3F),
                 self.ZHIYUN_VENDOR_ID & 0xFF,
                 (self.ZHIYUN_VENDOR_ID >> 8) & 0xFF
             ])
-
-            params = struct.pack(">HH3B", self.ZHIYUN_DEVICE_ID, brightness_value, r, g, b)
-            data = opcode + params
-
-            await self._send_mesh_message(dest, data)
-            logger.info(f"Set RGB to ({r},{g},{b}) at {brightness}% for 0x{dest:04x}")
+            params = struct.pack(">HH3B", self.ZHIYUN_DEVICE_ID, brightness * 100, r, g, b)
+            await self._send_mesh_message(dest, opcode + params)
             return True
-
         except Exception as e:
-            logger.error(f"Failed to set RGB: {e}")
+            logger.error(f"set_rgb failed: {e}")
             return False
 
-    # --- High-level setup ---
-
     async def setup_device(self, target_uuid: Optional[str] = None) -> bool:
-        """
-        Complete setup workflow: scan, provision, and configure.
-
-        Args:
-            target_uuid: Device UUID to provision (scans if None)
-
-        Returns:
-            True if successful
-        """
         if target_uuid is None:
             devices = await self.scan_unprovisioned(timeout=5.0)
-
             if not devices:
-                logger.error("No unprovisioned devices found")
+                logger.error("No devices found")
                 return False
-
             target_uuid = devices[0]["uuid"]
-            logger.info(f"Found device: {target_uuid}")
+            logger.info(f"Found: {target_uuid}")
 
         unicast = await self.provision(target_uuid)
         if unicast is None:
-            logger.error("Provisioning failed")
             return False
 
-        if not await self.configure(unicast):
-            logger.error("Configuration failed")
-            return False
-
-        logger.info(f"Device setup complete: {target_uuid} at 0x{unicast:04x}")
-        return True
+        return await self.configure(unicast)
