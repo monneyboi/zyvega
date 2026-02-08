@@ -58,7 +58,7 @@ def zybl_frame(cid, payload=b"", seq=1):
     Data section: field1(u16 LE) + seq(u16 LE) + cid(u16 LE) + payload
     Frame: header(2) + len(1) + 0x00(1) + data_section(N) + crc(2 LE)
     """
-    data_section = struct.pack("<HHH", 0x0001, seq, cid) + payload
+    data_section = struct.pack("<HHH", 0x0100, seq, cid) + payload
     crc = _crc16_xmodem(data_section)
     length = len(data_section)
     return ZYBL_HEADER + bytes([length, 0x00]) + data_section + struct.pack("<H", crc)

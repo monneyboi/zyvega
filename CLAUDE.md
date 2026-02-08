@@ -80,38 +80,76 @@ Header (2B)  Len (1B)  Pad (1B)  Data Section (N B)          CRC (2B LE)
 ```
 
 - **Header**: always `$<` (`0x24 0x3C`)
-- **Len**: length of data section in bytes
+- **Len**: length of data section in bytes (= payload_size + 6)
 - **Pad**: always `0x00`
 - **Data section**: `field1(u16 LE) + seq(u16 LE) + cid(u16 LE) + payload`
-  - `field1`: always `0x0001` (purpose unknown, possibly protocol version)
-  - `seq`: sequence number (incrementing)
+  - `field1`: `0x0100` (confirmed from libzylink.so — wire bytes `00 01`)
+  - `seq`: sequence number (incrementing u16)
   - `cid`: command ID (e.g. `0x2003` for device info)
-- **CRC**: CRC-16/XMODEM over the data section (poly=0x1021, init=0)
+- **CRC**: CRC-16/XMODEM over the data section only (poly=0x1021, init=0)
+
+Total frame size = payload_size + 12 bytes (confirmed from `Pack()` allocation).
 
 Responses use the same framing. Implemented in `gatt.py` as `zybl_frame()` and
 `zybl_parse()`.
 
-### Command IDs (from ZYLightClient.smali)
+**NOTE**: `gatt.py` currently uses field1=0x0001 which may be wrong — the binary
+uses 0x0100. Needs verification against actual hardware.
 
-| CID    | Name            | Parameters (Java side)                      |
-|--------|-----------------|---------------------------------------------|
-| 0x1001 | kCmdIdLight     | `(int deviceId, float brightness)`          |
-|        |                 | `(int deviceId, float brightness, int mode)`|
-| 0x1002 | kCmdIdColorTemp | `(int deviceId, int colorTemp)`             |
-| 0x1003 | kCmdIdRGB       | `(int deviceId, int r, int g, int b)`       |
-|        |                 | `(int deviceId, float bright, int r,g,b)`   |
-| 0x1004 | kCmdIdHue       | `(int deviceId, float hue)`                 |
-| 0x1005 | kCmdIdSat       | `(int deviceId, float saturation)`          |
-| 0x1006 | kCmdIdCMY       | `(int deviceId, int cmyValue)`              |
-| 0x1007 | kCmdIdChmcoor   | `(int deviceId, int gamut, float x, float y)` |
-| 0x2001 | kCmdVoltage     | query only                                  |
-| 0x2002 | kCmdMtu         | query only                                  |
-| 0x2003 | kCmdDeviceInfo  | query only — returns model, gen, serialNo   |
-| 0xFFFF | kCmdOnlineStat  | status event                                |
+### ZYBL payload format (from libzylink.so reverse engineering)
+
+The payload (after the CID in the data section) has this structure:
+
+```
+[device_id (u16 LE)] [write_flag (u8)] [value_bytes...]
+```
+
+- **device_id**: target device ID (u16 LE)
+- **write_flag**: `0x00` for read/query, `0x33` for write/control
+- **value_bytes**: CID-specific data (see table below)
+
+For **read/query** commands: write_flag = 0x00, value bytes are zero-filled.
+For **no-payload** commands (0x2003, 0x2005): no device_id/write_flag at all.
+
+### Command IDs and wire formats (from libzylink.so + ZYLightClient.smali)
+
+| CID    | Name           | Value format after write_flag              | Size |
+|--------|----------------|---------------------------------------------|------|
+| 0x1001 | Brightness     | float32 LE (0.0–1.0)                       | 4    |
+| 0x1002 | Color Temp     | u16 LE kelvin (2700–6500)                   | 2    |
+| 0x1005 | Saturation     | float32 LE                                  | 4    |
+| 0x1007 | Chroma Coord   | u8 gamut + float32 x + float32 y            | 9    |
+| 0x100a | HSI            | float32 hue + float32 sat + u16 intensity   | 10   |
+| 0x100b | Brightness+Mode| float32 brightness + s8 mode                | 5    |
+| 0x2003 | Device Info    | (no payload — query only)                   | 0    |
+| 0x2005 | Device ID Read | (no payload — query only)                   | 0    |
+
+CIDs **0x100a** (HSI) and **0x100b** (brightness+mode) are only visible in the
+native library, not in the Java/smali decompile.
+
+From the Java side, additional CIDs exist: 0x1003 (RGB), 0x1004 (Hue),
+0x1006 (CMY), 0x2001 (Voltage), 0x2002 (MTU), 0xFFFF (Online Status).
+Their native payload formats were not decompiled yet but likely follow the same
+`[device_id] [write_flag] [value]` pattern.
+
+### Example: set brightness to 50%
+
+```
+24 3C                 header "$<"
+0D                    len = 13 (6 header + 2 dev_id + 1 flag + 4 float)
+00                    pad
+00 01                 field1 (0x0100 LE)
+01 00                 seq = 1
+01 10                 cid = 0x1001
+01 00                 device_id = 1
+33                    write_flag = 0x33 (control mode)
+00 00 00 3F           float32 LE 0.5
+XX XX                 CRC-16/XMODEM over data section
+```
 
 ### Response format (from ZYLightClient.onMessageReceived)
 
-Responses are routed by Message.what (opcode):
+Responses are routed by CID (Message.what):
 
 - **0x1001**: Bundle key "light" (float) — brightness value
 - **0x1002**: Bundle key "colorTemp" (short) — color temperature
@@ -172,29 +210,22 @@ supported CIDs. Example for PL103 (`1.6.4.config`):
 
 ## What is known vs unknown
 
-### Known
+### Known (fully reverse-engineered)
 - Mesh is for provisioning only; runtime control is via 0xFEE9 custom BLE
 - Company ID: `0x0059`, Vendor Model: `0x0002`
-- ZYBL frame format (header, CRC, CID field)
-- Command IDs (CIDs): 0x1001-0x1007, 0x2001-0x2003
-- Java-side parameter types for each command
+- ZYBL frame format: header, length, field1, seq, CID, payload, CRC
+- ZYBL payload format: `[device_id(u16)] [write_flag(u8)] [value_bytes]`
+- Value byte encoding for key CIDs: brightness (float32), CCT (u16), saturation
+  (float32), HSI (2xfloat32+u16), chroma coords (u8+2xfloat32)
 - Network configuration and provisioning flow
 - Device capabilities per model/firmware
 
-### Unknown (hidden in libzylink.so)
-- **Payload byte format** for each CID — how Java parameters (float brightness,
-  int colorTemp, etc.) are encoded into the ZYBL payload bytes after the CID
-- Whether the payload encoding is simple (e.g. raw float32/int16) or has
-  additional structure (sub-fields, flags, device addressing within payload)
-- The exact role of `field1` (`0x0001`) in the ZYBL frame
-
-### How to determine unknowns
-1. **Reverse-engineer libzylink.so**: ARM64 binary at
-   `vega-decompiled/lib/arm64-v8a/libzylink.so` — contains all encoding logic
-2. **Packet capture**: Use `btmon` to capture traffic between the Android app
-   and the light — ZYBL frames will be visible in ATT write operations
-3. **Trial and error**: Send ZYBL frames with guessed payload formats using
-   `ble send` and observe the light's response
+### Needs verification
+- **field1 value**: Binary uses 0x0100, gatt.py uses 0x0001 — test against hardware
+- **write_flag value**: Assumed 0x33 from config files' `controlMode` — verify
+- **device_id**: What value to use (0x0001? 0x0000? from provisioning?)
+- **RGB, Hue, CMY payload formats**: Not yet decompiled from libzylink.so
+- **Response payload parsing**: How response payloads map to the Java Bundle keys
 
 ## Implementation plan
 
@@ -209,9 +240,10 @@ supported CIDs. Example for PL103 (`1.6.4.config`):
 ### Phase 2: Direct BLE control (current)
 7. Connect to light via standard BLE (0xFEE9 service) — **done** (`gatt.py`)
 8. Implement ZYBL wire protocol (framing, CRC) — **done** (`gatt.py`)
-9. Reverse-engineer payload format from `libzylink.so`
-10. Implement brightness (0x1001) and CCT (0x1002) commands
-11. Parse responses
+9. Reverse-engineer payload format from `libzylink.so` — **done**
+10. Fix field1 value in gatt.py (0x0100 vs 0x0001) — verify against hardware
+11. Implement brightness (0x1001) and CCT (0x1002) commands with payload encoding
+12. Parse responses
 
 ### Phase 3: Extended features
 12. RGB, HSI, CMY control for color models
