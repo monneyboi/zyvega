@@ -20,8 +20,6 @@ Zyvega - Zhiyun Light Controller
 Light control:
   brightness <0-100>        Set brightness (percent)
   cct <2700-6500>           Set color temperature (Kelvin)
-  sat <0-100>               Set saturation (percent)
-  hsi <hue> <sat> <int>     Set HSI (hue 0-360, sat 0-100, intensity 0-100)
   get brightness            Query current brightness
   get cct                   Query current color temperature
   get info                  Query device info (serial, model)
@@ -212,30 +210,6 @@ def handle_light_command(gatt, cmd, parts):
             return
         gatt.set_cct(kelvin)
 
-    elif cmd == "sat":
-        if len(parts) < 2:
-            print("Usage: sat <0-100>")
-            return
-        try:
-            value = float(parts[1])
-        except ValueError:
-            print("Usage: sat <0-100>")
-            return
-        gatt.set_saturation(value)
-
-    elif cmd == "hsi":
-        if len(parts) < 4:
-            print("Usage: hsi <hue 0-360> <saturation 0-100> <intensity 0-100>")
-            return
-        try:
-            hue = float(parts[1])
-            sat = float(parts[2]) / 100.0
-            intensity = int(parts[3])
-        except ValueError:
-            print("Usage: hsi <hue 0-360> <saturation 0-100> <intensity 0-100>")
-            return
-        gatt.set_hsi(hue, sat, intensity)
-
     elif cmd in ("info", "get"):
         if cmd == "info":
             what = "info"
@@ -277,7 +251,7 @@ def handle_command(state, line):
     elif cmd == "mesh":
         handle_mesh_command(state, parts)
 
-    elif cmd in ("brightness", "cct", "sat", "hsi", "get", "info"):
+    elif cmd in ("brightness", "cct", "get", "info"):
         handle_light_command(state["gatt"], cmd, parts)
 
     else:

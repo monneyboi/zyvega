@@ -588,22 +588,6 @@ class GattController:
         payload = _query_payload(self._get_device_id(), 2)
         self.send_command(CID_CCT, payload)
 
-    def set_saturation(self, value):
-        """Set saturation. value: 0-100 (percent)."""
-        value = max(0.0, min(100.0, float(value)))
-        payload = _control_payload(self._get_device_id(), struct.pack("<f", value))
-        self.send_command(CID_SATURATION, payload)
-        print(f"[ble] Setting saturation to {value:.0f}%")
-
-    def set_hsi(self, hue, saturation, intensity):
-        """Set HSI color. hue: 0-360, saturation: 0.0-1.0, intensity: 0-100."""
-        payload = _control_payload(
-            self._get_device_id(),
-            struct.pack("<ffH", float(hue), float(saturation), int(intensity)),
-        )
-        self.send_command(CID_HSI, payload)
-        print(f"[ble] Setting HSI: hue={hue:.1f} sat={saturation:.1%} intensity={intensity}")
-
     def query_info(self):
         """Query device info (serial, model)."""
         self.send_command(CID_DEVICE_INFO)
